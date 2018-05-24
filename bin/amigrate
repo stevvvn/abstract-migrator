@@ -1,0 +1,271 @@
+#!/usr/bin/env node
+'use strict';
+const args = require('minimist')(process.argv.slice(2));
+const fs = require('fs');
+const path = require('path');
+const obj = require('hex-object');
+
+function usage() {
+	console.log(`Usage: ${ path.basename(process.argv[1]) } [options] verb [verb args]
+
+Options:
+   --path|-p path: Apply migrations in the given path rather than using cwd
+     (Either with this option or falling back to cwd, if the leaf folder is
+     called 'migrations' its subfolders will each be used according to their
+     store type. Otherwise, the path is considered to be the store type and
+     only its contents are considered)
+
+     If 'conf.js' exists in the path, its containing 'migrations' folder, or
+     its parent, its exported object will be provided to the store. Likewise,
+     'secrets.js' in the same places will be merged. (This is so you can check
+     in some consistent connection parameters in 'conf.js' if you want while
+     .gitignoring secrets.js with local passwords)
+
+   --template|-t path: For 'create' only, specifies the template to use when
+     generating the migration file. Default is 'template.js' in the destination
+     path.
+
+   --force|-f: for 'up' and 'down', attempt the operation regardless of
+     where the migration state indicates it's a good idea
+
+Verbs:
+   up: Apply given migration(s)
+      args: Name or path to a given migration to run it specifically.
+        Default behavior is to apply all available migrations according to the
+        path.
+
+   down: Roll-back given migration
+      args: Name or path to a given migration to roll it back specifically.
+        You must specify which migration to roll back.
+
+   create: Create a new migration file based on the name you give
+      args: Supply as many arguments as you want to be concatenated into the
+        migration name. ('create "foo bar"' and 'create foo bar' are the same)
+
+        Outputs the name of the generated file.
+
+        Migrations should export '{ up, down }', where 'up' and 'down' are
+        functions that accept a database handle defined by their store type as
+        an arg.
+`
+	);
+	process.exit();
+}
+
+
+const getArg = (key, def) => args[key] ? args[key] : args[key[0]] ? args[key[0]] : def;
+
+// determine path(s) to check for migrations
+// --path/-p is preferred to cwd
+// whichever is available, if the leaf folder is called 'migrations' the folders
+// inside it are used. otherwise, it is assumed the migrations of concerns are
+// in that folder directly
+const paths = (() => {
+	const cwd = process.cwd();
+	let path = getArg('path', '').replace(/\/+$/, '');
+	if (!path) {
+		path = cwd;
+		if (fs.existsSync(`${ path }/migrations`)) {
+			path = `${ path }/migrations`;
+		}
+	}
+	const absPath = /^\//.test(path) ? path : `${ cwd }/${ path }`;
+	if (!/\/migrations$/.test(path)) {
+		return [ absPath ];
+	}
+	return fs.readdirSync(path)
+		.map((file) => `${ absPath }/${ file }`)
+		.filter((file) => fs.statSync(file).isDirectory())
+		.sort()
+})();
+
+const getConf = (base) => {
+	const tryPath = (p) => {
+		if (fs.existsSync(`${ p }/conf.js`)) {
+			const rv = obj.wrap(require(`${ p }/conf`));
+			if (fs.existsSync(`${ p }/secrets.js`)) {
+				rv.augment(require(`${ p }/secrets.js`));
+			}
+			return rv.normalize();
+		}
+	};
+	let rv = tryPath(base);
+	if (rv) {
+		return { 'path': base, 'value': rv };
+	}
+	// check containing folder, hopefully "migrations"
+	let prnt = path.resolve(`${ base }/..`);
+	rv = tryPath(prnt);
+	if (rv) {
+		return { 'path': prnt, 'value': rv };
+	}
+	// iif that was migrations, check one further up for a conf file shared with
+	// the rest of the application
+	if (/\/migrations$/.test(prnt)) {
+		prnt = path.resolve(`${ prnt }/..`);
+		rv = tryPath(prnt);
+	}
+	return rv ? { 'path': prnt, 'value': rv } : { 'value': obj.wrap({}) };
+};
+
+const getImpl = (folder) => {
+	const conf = getConf(folder);
+	console.log({ folder, 'conf': conf.path ? conf.path : 'none found' });
+	// look up implementation from calling location's perspective
+	let mods = folder;
+	while (mods !== '/' && !fs.existsSync(`${ mods }/node_modules`)) {
+		mods = path.resolve(`${ mods }/..`);
+	}
+	module.paths.push(`${ mods }/node_modules`);
+	return require(`abstract-migrator-${ path.basename(folder) }`)(conf.value)
+}
+
+const bail = (err) => {
+	console.error(err);
+	process.exit(1);
+};
+
+const ensureApplied = (impl, applied, name) => {
+	if (getArg('force', false)) {
+		return Promise.resolve();
+	}
+	return impl.applied(name).then((res) => {
+		if (res !== applied) {
+			throw new Error(
+				`migration ${ applied ? 'not yet applied' : 'already applied' }. won't proceed without --force`
+			);
+		}
+	});
+};
+
+const run = (impl, dir, file) => {
+	const name = path.basename(file).replace(/[.]js$/, '');
+	return ensureApplied(impl, dir === 'down', name)
+		.then(() => new Promise((resolve, reject) => {
+			console.log('\t', dir === 'up' ? '/\\' : '\\/', name);
+			try {
+				const res = require(file)[dir](impl.handle);
+				if (res && res.then) {
+					res.then(resolve, reject);
+				}
+				else {
+					resolve();
+				}
+			}
+			catch (ex) {
+				reject(ex);
+			}
+		}))
+		.then(() => dir === 'up' ? impl.record(name) : impl.remove(name));
+};
+
+const getFileArg = () => {
+	let rv = args._[1];
+	if (!rv) {
+		return;
+	}
+	if (/^\//.test(rv) && fs.existsSync(rv)) {
+		return rv;
+	}
+	if (/^[.]\//.test(rv) && fs.existsSync(rv)) {
+		return `${ process.cwd() }/${ rv }`;
+	}
+	if (paths.some((path) => {
+		if (fs.existsSync(`${ path }/${ rv }`)) {
+			rv = `${ path }/${ rv }`;
+			return true;
+		}
+	})) {
+		return rv;
+	}
+	console.error('cannot find specified migration in given paths', rv, JSON.stringify(paths));
+	console.error('you can provide an absolute path to skip this search, or start with "./" to search relative to cwd instead');
+	process.exit(1);
+}
+
+const applySingle = (arg, dir) => {
+	const folder = path.dirname(arg);
+	return getImpl(folder).then((impl) => {
+		run(impl, dir, arg)
+			.then(() => impl.commit(), bail)
+			.then(() => impl.close())
+	}, bail);
+};
+
+
+const specFile = getFileArg();
+switch (args._[0]) {
+	case 'create':
+		if (paths.length > 1) {
+			console.error('destination folder is ambiguous', JSON.stringify(paths));
+			console.error('Provide --path or cd to a folder that\'s not "migrations"');
+			process.exit(1);
+		}
+		const name = args._.slice(1).join('-').toLowerCase().replace(/\s+/g, '-').replace(/[^-_a-z0-9]/g, '');
+		if (!name) {
+			console.error('you must provide a name after "create"');
+			process.exit(1);
+		}
+		const tpl = (() => {
+			// if a specific template is provided it must be used
+			let arg = getArg('template', null);
+			if (arg && !fs.existsSync(arg)) {
+				console.error('specified template does not exist', arg);
+				process.exit(1);
+			}
+			// otherwise check for template.js in the given folder, or fall back
+			// to the default shipped w/ this module
+			if (!arg) {
+				arg = fs.existsSync(`${ paths[0] }/template.js`) ? `${ paths[0] }/template.js` : `${ __dirname }/../default-template.js`;
+			}
+			return fs.createReadStream(arg);
+		})();
+		const fullPath = `${ paths[0] }/${ (new Date).toISOString().replace(/[:.]/g, '-') }-${ name }.js`;
+		const write = fs.createWriteStream(fullPath);
+		write.on('close', () => console.log(fullPath));
+		tpl.pipe(write);
+	break;
+
+	case 'up':
+		if (specFile) {
+			applySingle(specFile, 'up');
+		}
+		else {
+			paths.forEach((folder) => {
+				getImpl(folder).then((impl) => {
+					const work = [];
+					const targets = fs.readdirSync(folder)
+						.forEach((file) => {
+							if (!/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d+.*[.]js$/.test(file)) {
+								return;
+							}
+							work.push(
+								impl.applied(file.replace(/[.]js$/, ''))
+									.then((applied) => applied ? null : `${ folder }/${ file }`)
+							);
+						});
+					return Promise.all(work)
+						.then((files) => {
+							let work = Promise.resolve();
+							files.filter((file) => file !== null).sort().forEach((file) =>
+								work = work.then(() => run(impl, 'up', file))
+							);
+							return work;
+						}, bail)
+						.then(() => impl.commit(), bail)
+						.then(() => impl.close());
+				}, bail);
+			});
+		}
+	break;
+
+	case 'down':
+		if (!specFile) {
+			console.error('you must specify a file when rolling back a migration');
+			process.exit(1);
+		}
+		applySingle(specFile, 'down');
+	break;
+
+	default: usage();
+}
