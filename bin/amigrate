@@ -52,14 +52,22 @@ Verbs:
 	process.exit();
 }
 
+const getArg = (key, def) =>
+	// full name given (--path)
+	args[key]    ? args[key]    :
+	// short version (-p)
+	args[key[0]] ? args[key[0]] :
+	// fallback
+	               def;
 
-const getArg = (key, def) => args[key] ? args[key] : args[key[0]] ? args[key[0]] : def;
-
-// determine path(s) to check for migrations
-// --path/-p is preferred to cwd
-// whichever is available, if the leaf folder is called 'migrations' the folders
-// inside it are used. otherwise, it is assumed the migrations of concerns are
-// in that folder directly
+/**
+ * Determine path(s) to check for migrations
+ *
+ * --path/-p is preferred to cwd
+ * Whichever is available, if the leaf folder is called 'migrations' the folders
+ * inside it are used. Otherwise, it is assumed the migrations of concerns are
+ * in that folder directly
+ */
 const paths = (() => {
 	const cwd = process.cwd();
 	let path = getArg('path', '').replace(/\/+$/, '');
@@ -73,12 +81,20 @@ const paths = (() => {
 	if (!/\/migrations$/.test(path)) {
 		return [ absPath ];
 	}
+	// in a folder called 'migrations', scan for contents
 	return fs.readdirSync(path)
 		.map((file) => `${ absPath }/${ file }`)
 		.filter((file) => fs.statSync(file).isDirectory())
 		.sort()
 })();
 
+/**
+ * Look for conf.js & secrets.js for a given migrations folder
+ *
+ * With /some/project/migrations/type as an example, these files can be in
+ * 'type', 'migrations', or 'project'. Only the most-deeply-nested version
+ * found will be used.
+ */
 const getConf = (base) => {
 	const tryPath = (p) => {
 		if (fs.existsSync(`${ p }/conf.js`)) {
@@ -108,6 +124,11 @@ const getConf = (base) => {
 	return rv ? { 'path': prnt, 'value': rv } : { 'value': obj.wrap({}) };
 };
 
+/**
+ * Load the plugin responsible for a given migration type
+ *
+ * abstract-migrator-$something for /migrations/$something/*.js
+ */
 const getImpl = (folder) => {
 	const conf = getConf(folder);
 	console.log({ folder, 'conf': conf.path ? conf.path : 'none found' });
@@ -125,22 +146,27 @@ const bail = (err) => {
 	process.exit(1);
 };
 
-const ensureApplied = (impl, applied, name) => {
+/**
+ * Try not to do operations that would bring migrations to the state they're
+ * already in, except when '--force'd
+ */
+const assertApplied = (impl, applied, name) => {
 	if (getArg('force', false)) {
 		return Promise.resolve();
 	}
 	return impl.applied(name).then((res) => {
 		if (res !== applied) {
-			throw new Error(
-				`migration ${ applied ? 'not yet applied' : 'already applied' }. won't proceed without --force`
-			);
+			bail(`migration ${ applied ? 'not yet applied' : 'already applied' }. won't proceed without --force`);
 		}
 	});
 };
 
+/**
+ * Run up or down operation against a file
+ */
 const run = (impl, dir, file) => {
 	const name = path.basename(file).replace(/[.]js$/, '');
-	return ensureApplied(impl, dir === 'down', name)
+	return assertApplied(impl, dir === 'down', name)
 		.then(() => new Promise((resolve, reject) => {
 			console.log('\t', dir === 'up' ? '/\\' : '\\/', name);
 			try {
@@ -159,6 +185,11 @@ const run = (impl, dir, file) => {
 		.then(() => dir === 'up' ? impl.record(name) : impl.remove(name));
 };
 
+/**
+ * Get the filename passed an argument after 'up' or 'down', where available
+ *
+ * If it is set, ensure we can find it
+ */
 const getFileArg = () => {
 	let rv = args._[1];
 	if (!rv) {
@@ -183,6 +214,9 @@ const getFileArg = () => {
 	process.exit(1);
 }
 
+/**
+ * Do a targeted up or down
+ */
 const applySingle = (arg, dir) => {
 	const folder = path.dirname(arg);
 	return getImpl(folder).then((impl) => {
@@ -201,11 +235,19 @@ switch (args._[0]) {
 			console.error('Provide --path or cd to a folder that\'s not "migrations"');
 			process.exit(1);
 		}
-		const name = args._.slice(1).join('-').toLowerCase().replace(/\s+/g, '-').replace(/[^-_a-z0-9]/g, '');
+		// convert args after 'create' into something suitable for a filename
+		const name = args._
+			.slice(1)
+			.join('-')
+			.toLowerCase()
+			.replace(/\s+/g, '-')
+			.replace(/[^-_a-z0-9]/g, '');
+
 		if (!name) {
 			console.error('you must provide a name after "create"');
 			process.exit(1);
 		}
+
 		const tpl = (() => {
 			// if a specific template is provided it must be used
 			let arg = getArg('template', null);
@@ -216,10 +258,13 @@ switch (args._[0]) {
 			// otherwise check for template.js in the given folder, or fall back
 			// to the default shipped w/ this module
 			if (!arg) {
-				arg = fs.existsSync(`${ paths[0] }/template.js`) ? `${ paths[0] }/template.js` : `${ __dirname }/../default-template.js`;
+				arg = fs.existsSync(`${ paths[0] }/template.js`)
+					? `${ paths[0] }/template.js`
+					: `${ __dirname }/../default-template.js`;
 			}
 			return fs.createReadStream(arg);
 		})();
+		// copy to timestamped destination
 		const fullPath = `${ paths[0] }/${ (new Date).toISOString().replace(/[:.]/g, '-') }-${ name }.js`;
 		const write = fs.createWriteStream(fullPath);
 		write.on('close', () => console.log(fullPath));
@@ -236,22 +281,33 @@ switch (args._[0]) {
 					const work = [];
 					const targets = fs.readdirSync(folder)
 						.forEach((file) => {
+							// check for timestamp. other utilities/swap files/etc can
+							// be included in the migrations folders without hurting anything
 							if (!/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d+.*[.]js$/.test(file)) {
 								return;
 							}
+							// check each file to see whether the implementation has
+							// a record of running it already
 							work.push(
 								impl.applied(file.replace(/[.]js$/, ''))
 									.then((applied) => applied ? null : `${ folder }/${ file }`)
 							);
 						});
-					return Promise.all(work)
+
+					Promise.all(work)
 						.then((files) => {
+							// the files need to be processed serially, so create a chain rather
+							// than Promise.all()-ing again
 							let work = Promise.resolve();
-							files.filter((file) => file !== null).sort().forEach((file) =>
-								work = work.then(() => run(impl, 'up', file))
-							);
+							files
+								.filter((file) => file !== null)
+								.sort()
+								.forEach((file) =>
+									work = work.then(() => run(impl, 'up', file))
+								);
 							return work;
 						}, bail)
+						// only considered successful when everything applies
 						.then(() => impl.commit(), bail)
 						.then(() => impl.close());
 				}, bail);
