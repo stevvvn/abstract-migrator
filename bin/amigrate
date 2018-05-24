@@ -227,7 +227,7 @@ const applySingle = (arg, dir) => {
 };
 
 
-const specFile = getFileArg();
+let specFile;
 switch (args._[0]) {
 	case 'create':
 		if (paths.length > 1) {
@@ -272,6 +272,7 @@ switch (args._[0]) {
 	break;
 
 	case 'up':
+		specFile = getFileArg();
 		if (specFile) {
 			applySingle(specFile, 'up');
 		}
@@ -316,6 +317,7 @@ switch (args._[0]) {
 	break;
 
 	case 'down':
+		specFile = getFileArg();
 		if (!specFile) {
 			console.error('you must specify a file when rolling back a migration');
 			process.exit(1);
