@@ -129,7 +129,7 @@ const getConf = (base) => {
  *
  * abstract-migrator-$something for /migrations/$something/*.js
  */
-const getImpl = (folder) => {
+const getImpl = async (folder) => {
 	const conf = getConf(folder);
 	console.log({ folder, 'conf': conf.path ? conf.path : 'none found' });
 	// look up implementation from calling location's perspective
@@ -138,7 +138,7 @@ const getImpl = (folder) => {
 		mods = path.resolve(`${ mods }/..`);
 	}
 	module.paths.push(`${ mods }/node_modules`);
-	return require(`abstract-migrator-${ path.basename(folder) }`)(conf.value)
+	return { conf, 'impl': await require(`abstract-migrator-${ path.basename(folder) }`)(conf.value) };
 }
 
 const bail = (err) => {
@@ -164,13 +164,13 @@ const assertApplied = (impl, applied, name) => {
 /**
  * Run up or down operation against a file
  */
-const run = (impl, dir, file) => {
+const run = ({ impl, conf }, dir, file) => {
 	const name = path.basename(file).replace(/[.]js$/, '');
 	return assertApplied(impl, dir === 'down', name)
 		.then(() => new Promise((resolve, reject) => {
 			console.log('\t', dir === 'up' ? '/\\' : '\\/', name);
 			try {
-				const res = require(file)[dir](impl.handle);
+				const res = require(file)[dir](impl.handle, conf.value);
 				if (res && res.then) {
 					res.then(resolve, reject);
 				}
@@ -219,8 +219,8 @@ const getFileArg = () => {
  */
 const applySingle = (arg, dir) => {
 	const folder = path.dirname(arg);
-	return getImpl(folder).then((impl) => {
-		run(impl, dir, arg)
+	return getImpl(folder).then(({ impl, conf }) => {
+		run({ impl, conf }, dir, arg)
 			.then(() => impl.commit(), bail)
 			.then(() => impl.close())
 	}, bail);
@@ -278,7 +278,7 @@ switch (args._[0]) {
 		}
 		else {
 			paths.forEach((folder) => {
-				getImpl(folder).then((impl) => {
+				getImpl(folder).then(({ impl, conf }) => {
 					const work = [];
 					const targets = fs.readdirSync(folder)
 						.forEach((file) => {
@@ -304,7 +304,7 @@ switch (args._[0]) {
 								.filter((file) => file !== null)
 								.sort()
 								.forEach((file) =>
-									work = work.then(() => run(impl, 'up', file))
+									work = work.then(() => run({ impl, conf }, 'up', file))
 								);
 							return work;
 						}, bail)
