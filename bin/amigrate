@@ -216,7 +216,6 @@ switch (args._[0]) {
 
 				let runFiles = Promise.resolve();
 				getMigrationsFromPath(folder)
-					.sort()
 					.forEach(async (file) => {
 						const isApplied = await impl.applied(file.replace(/(^.*\/|[.]js$)/g, ''));
 						if (!isApplied) {

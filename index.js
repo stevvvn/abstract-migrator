@@ -66,6 +66,7 @@ const getMigrationsFromPath = (path, state) =>
 	fs.readdirSync(path)
 		// starts with timestamp, ends with js
 		.filter((file) => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d+.*[.]js$/.test(file))
-		.map((file) => `${ path }/${ file }`);
+		.map((file) => `${ path }/${ file }`)
+		.sort();
 
 module.exports = { getImpl, run, applySingle, getMigrationsFromPath };
