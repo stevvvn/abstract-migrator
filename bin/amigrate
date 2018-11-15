@@ -5,6 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const obj = require('hex-object');
 
+const { getImpl, run, applySingle, getMigrationsFromPath } = require(`${ __dirname }/..`);
+
 function usage() {
 	console.log(`Usage: ${ path.basename(process.argv[1]) } [options] verb [verb args]
 
@@ -107,13 +109,13 @@ const getConf = (base) => {
 	};
 	let rv = tryPath(base);
 	if (rv) {
-		return { 'path': base, 'value': rv };
+		return rv;
 	}
 	// check containing folder, hopefully "migrations"
 	let prnt = path.resolve(`${ base }/..`);
 	rv = tryPath(prnt);
 	if (rv) {
-		return { 'path': prnt, 'value': rv };
+		return rv;
 	}
 	// iif that was migrations, check one further up for a conf file shared with
 	// the rest of the application
@@ -121,68 +123,12 @@ const getConf = (base) => {
 		prnt = path.resolve(`${ prnt }/..`);
 		rv = tryPath(prnt);
 	}
-	return rv ? { 'path': prnt, 'value': rv } : { 'value': obj.wrap({}) };
+	return rv ? rv : obj.wrap({});
 };
-
-/**
- * Load the plugin responsible for a given migration type
- *
- * abstract-migrator-$something for /migrations/$something/*.js
- */
-const getImpl = async (folder) => {
-	const conf = getConf(folder);
-	console.log({ folder, 'conf': conf.path ? conf.path : 'none found' });
-	// look up implementation from calling location's perspective
-	let mods = folder;
-	while (mods !== '/' && !fs.existsSync(`${ mods }/node_modules`)) {
-		mods = path.resolve(`${ mods }/..`);
-	}
-	module.paths.push(`${ mods }/node_modules`);
-	return { conf, 'impl': await require(`abstract-migrator-${ path.basename(folder) }`)(conf.value) };
-}
 
 const bail = (err) => {
 	console.error(err);
 	process.exit(1);
-};
-
-/**
- * Try not to do operations that would bring migrations to the state they're
- * already in, except when '--force'd
- */
-const assertApplied = (impl, applied, name) => {
-	if (getArg('force', false)) {
-		return Promise.resolve();
-	}
-	return impl.applied(name).then((res) => {
-		if (res !== applied) {
-			bail(`migration ${ applied ? 'not yet applied' : 'already applied' }. won't proceed without --force`);
-		}
-	});
-};
-
-/**
- * Run up or down operation against a file
- */
-const run = ({ impl, conf }, dir, file) => {
-	const name = path.basename(file).replace(/[.]js$/, '');
-	return assertApplied(impl, dir === 'down', name)
-		.then(() => new Promise((resolve, reject) => {
-			console.log('\t', dir === 'up' ? '/\\' : '\\/', name);
-			try {
-				const res = require(file)[dir](impl.handle, conf.value);
-				if (res && res.then) {
-					res.then(resolve, reject);
-				}
-				else {
-					resolve();
-				}
-			}
-			catch (ex) {
-				reject(ex);
-			}
-		}))
-		.then(() => dir === 'up' ? impl.record(name) : impl.remove(name));
 };
 
 /**
@@ -198,7 +144,7 @@ const getFileArg = () => {
 	if (/^\//.test(rv) && fs.existsSync(rv)) {
 		return rv;
 	}
-	if (/^[.]\//.test(rv) && fs.existsSync(rv)) {
+	if (fs.existsSync(`./${ rv }`)) {
 		return `${ process.cwd() }/${ rv }`;
 	}
 	if (paths.some((path) => {
@@ -210,22 +156,9 @@ const getFileArg = () => {
 		return rv;
 	}
 	console.error('cannot find specified migration in given paths', rv, JSON.stringify(paths));
-	console.error('you can provide an absolute path to skip this search, or start with "./" to search relative to cwd instead');
+	console.error('you can provide an absolute path to skip this search');
 	process.exit(1);
 }
-
-/**
- * Do a targeted up or down
- */
-const applySingle = (arg, dir) => {
-	const folder = path.dirname(arg);
-	return getImpl(folder).then(({ impl, conf }) => {
-		run({ impl, conf }, dir, arg)
-			.then(() => impl.commit(), bail)
-			.then(() => impl.close())
-	}, bail);
-};
-
 
 let specFile;
 switch (args._[0]) {
@@ -274,45 +207,26 @@ switch (args._[0]) {
 	case 'up':
 		specFile = getFileArg();
 		if (specFile) {
-			applySingle(specFile, 'up');
+			applySingle(specFile, 'up', getConf(), getArg('force', false));
 		}
 		else {
-			paths.forEach((folder) => {
-				getImpl(folder).then(({ impl, conf }) => {
-					const work = [];
-					const targets = fs.readdirSync(folder)
-						.forEach((file) => {
-							// check for timestamp. other utilities/swap files/etc can
-							// be included in the migrations folders without hurting anything
-							if (!/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d+.*[.]js$/.test(file)) {
-								return;
-							}
-							// check each file to see whether the implementation has
-							// a record of running it already
-							work.push(
-								impl.applied(file.replace(/[.]js$/, ''))
-									.then((applied) => applied ? null : `${ folder }/${ file }`)
-							);
-						});
+			paths.forEach(async (folder) => {
+				const conf = getConf(folder);
+				const impl = await getImpl(folder, conf);
 
-					Promise.all(work)
-						.then((files) => {
-							// the files need to be processed serially, so create a chain rather
-							// than Promise.all()-ing again
-							let work = Promise.resolve();
-							files
-								.filter((file) => file !== null)
-								.sort()
-								.forEach((file) =>
-									work = work.then(() => run({ impl, conf }, 'up', file))
-								);
-							return work;
-						}, bail)
-						// only considered successful when everything applies
-						.then(() => impl.commit(), bail)
-						.then(() => impl.close());
-				}, bail);
-			});
+				let runFiles = Promise.resolve();
+				getMigrationsFromPath(folder)
+					.sort()
+					.forEach(async (file) => {
+						const isApplied = await impl.applied(file.replace(/(^.*\/|[.]js$)/g, ''));
+						if (!isApplied) {
+							runFiles = runFiles.then(run({ impl, conf, 'dir': 'up', file, 'force': getArg('force', false) }))
+						}
+					});
+				await runFiles;
+				await impl.commit();
+				impl.close();
+			})
 		}
 	break;
 
@@ -322,7 +236,7 @@ switch (args._[0]) {
 			console.error('you must specify a file when rolling back a migration');
 			process.exit(1);
 		}
-		applySingle(specFile, 'down');
+		applySingle(specFile, 'down', getConf(), getArg('force', false));
 	break;
 
 	default: usage();
