@@ -14,7 +14,6 @@ const getImpl = async (folder, conf) => {
 		mods = path.resolve(`${ mods }/..`);
 	}
 	module.paths.push(`${ mods }/node_modules`);
-	console.log({ conf });
 	return require(`abstract-migrator-${ path.basename(folder) }`)(conf);
 }
 
@@ -37,7 +36,7 @@ const assertApplied = async (impl, applied, name, force) => {
  */
 const run = async ({ impl, conf, dir, file, force }) => {
 	if (!impl) {
-		impl = await getImpl(path.dirname(file));
+		impl = await getImpl(path.dirname(file), conf);
 	}
 	const name = path.basename(file).replace(/[.]js$/, '');
 	await assertApplied(impl, dir === 'down', name, force)
