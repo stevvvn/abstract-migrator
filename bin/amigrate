@@ -210,22 +210,23 @@ switch (args._[0]) {
 			applySingle(specFile, 'up', getConf(), getArg('force', false));
 		}
 		else {
-			paths.forEach(async (folder) => {
-				const conf = getConf(folder);
-				const impl = await getImpl(folder, conf);
+			(async() => {
+				for (const folder of paths) {
+					const conf = getConf(folder);
+					const impl = await getImpl(folder, conf);
 
-				let runFiles = Promise.resolve();
-				getMigrationsFromPath(folder)
-					.forEach(async (file) => {
+					let runFiles = Promise.resolve();
+					for (const file of getMigrationsFromPath(folder)) {
 						const isApplied = await impl.applied(file.replace(/(^.*\/|[.]js$)/g, ''));
 						if (!isApplied) {
-							runFiles = runFiles.then(run({ impl, conf, 'dir': 'up', file, 'force': getArg('force', false) }))
+							await run({ impl, conf, 'dir': 'up', file, 'force': getArg('force', false) });
 						}
-					});
-				await runFiles;
-				await impl.commit();
-				impl.close();
-			})
+					}
+					await runFiles;
+					await impl.commit();
+					impl.close();
+				}
+			})();
 		}
 	break;
 
