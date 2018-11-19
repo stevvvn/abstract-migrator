@@ -7,7 +7,15 @@ const path = require('path');
  *
  * abstract-migrator-$something for /migrations/$something/*.js
  */
+
+let pushedCwd = false;
 const getImpl = async (folder, conf) => {
+	if (!pushedCwd) {
+		if (fs.existsSync(`${ process.cwd() }/node_modules`)) {
+			module.paths.push(`${ process.cwd() }/node_modules`);
+		}
+		pushedCwd = true;
+	}
 	// look up implementation from calling location's perspective
 	let mods = folder;
 	while (mods !== '/' && !fs.existsSync(`${ mods }/node_modules`)) {
