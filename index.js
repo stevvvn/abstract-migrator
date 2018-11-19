@@ -60,7 +60,6 @@ const run = async ({ impl, conf, dir, file, force }) => {
 const applySingle = async (file, dir, conf, force) => {
 	const folder = path.dirname(file);
 	const impl = await getImpl(folder, conf);
-	let err;
 	try {
 		await run({
 			impl,
@@ -70,13 +69,9 @@ const applySingle = async (file, dir, conf, force) => {
 			force
 		});
 	}
-	catch (ex) {
-		err = ex;
-	}
-	await impl.commit();
-	await impl.close();
-	if (err) {
-		throw err;
+	finally {
+		await impl.commit();
+		await impl.close();
 	}
 };
 

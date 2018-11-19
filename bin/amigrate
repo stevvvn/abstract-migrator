@@ -222,7 +222,15 @@ switch (args._[0]) {
 					for (const file of getMigrationsFromPath(folder)) {
 						const isApplied = await impl.applied(file.replace(/(^.*\/|[.]js$)/g, ''));
 						if (!isApplied) {
-							await run({ impl, conf, 'dir': 'up', file, 'force': getArg('force', false) });
+							try {
+								await run({ impl, conf, 'dir': 'up', file, 'force': getArg('force', false) });
+							}
+							catch (err) {
+								console.error(err.toString());
+								await impl.rollback();
+								await impl.close();
+								process.exit(1);
+							}
 						}
 					}
 					await runFiles;
