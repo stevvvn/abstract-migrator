@@ -47,8 +47,9 @@ const run = async ({ impl, conf, dir, file, force }) => {
 		impl = await getImpl(path.dirname(file), conf);
 	}
 	const name = path.basename(file).replace(/[.]js$/, '');
-	await assertApplied(impl, dir === 'down', name, force)
 	console.log('\t', dir === 'up' ? '/\\' : '\\/', name);
+
+	await assertApplied(impl, dir === 'down', name, force)
 	const res = await require(file)[dir](impl.handle, conf.value);
 	return impl[dir === 'up' ? 'record' : 'remove'](name);
 };
@@ -59,15 +60,24 @@ const run = async ({ impl, conf, dir, file, force }) => {
 const applySingle = async (file, dir, conf, force) => {
 	const folder = path.dirname(file);
 	const impl = await getImpl(folder, conf);
-	await run({
-		impl,
-		conf,
-		dir,
-		file,
-		force
-	});
+	let err;
+	try {
+		await run({
+			impl,
+			conf,
+			dir,
+			file,
+			force
+		});
+	}
+	catch (ex) {
+		err = ex;
+	}
 	await impl.commit();
-	return impl.close();
+	await impl.close();
+	if (err) {
+		throw err;
+	}
 };
 
 const getMigrationsFromPath = (path, state) =>

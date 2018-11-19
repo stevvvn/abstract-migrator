@@ -207,7 +207,10 @@ switch (args._[0]) {
 	case 'up':
 		specFile = getFileArg();
 		if (specFile) {
-			applySingle(specFile, 'up', getConf(), getArg('force', false));
+			applySingle(specFile, 'up', getConf(path.dirname(specFile)), getArg('force', false))
+				.catch(async (err) =>
+					console.error(err.toString())
+				);
 		}
 		else {
 			(async() => {
